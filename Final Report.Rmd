@@ -1,0 +1,571 @@
+---
+title: "Great Lakes Final"
+author: "Ryan McCollum and Ethan Chapman"
+date: "2024-11-18"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = FALSE, warning=FALSE)
+```
+
+```{r dataSetup, message=FALSE, warning=FALSE}
+library(tidyverse)
+library(scales)
+library(kableExtra)
+library(forecast)
+library(broom.mixed)
+library(gt)
+#install.packages("forecast")
+
+# ice <- read_csv("greatlakesicedata.csv") #ethan version
+ ice <- read_csv("C:/DESKTOP/SEMESTER 7/STA 660/Great Lakes Ice Coverage/greatlakesicedata.csv") #ryan version
+icel <- ice |>
+  pivot_longer(cols=`1973`:`2024`, names_to="year") |>
+  mutate(
+    day = ydm(paste0("1904-",`...1`)),
+    date = as.Date(ifelse(day < ymd("1904-08-01"), ydm(paste0(year,"-",`...1`)), ydm(paste0(as.numeric(year)-1,"-",`...1`)))),
+    day = as.Date(ifelse(day < ymd("1904-08-01"), ydm(paste0("1904-",`...1`)), ydm(paste0("1903-",`...1`)))),
+    year = as.numeric(year)) |>
+  arrange(date)
+
+dailymeans <- icel |>
+  group_by(day) |>
+  summarise(cover=mean(value, na.rm=T),
+            obs = sum(!is.na(value)))
+
+yearly <- icel |>
+  group_by(year) |>
+  summarise(avg=mean(value, na.rm=T),
+            max=max(value, na.rm=T),
+            min=min(value, na.rm=T),
+            total=sum(value, na.rm=T),
+            over10 = sum(value >= 10, na.rm=T),
+            over20 = sum(value >= 20, na.rm=T),
+            over30 = sum(value >= 30, na.rm=T),
+            over40 = sum(value >= 40, na.rm=T),
+            over50 = sum(value >= 50, na.rm=T))
+
+pds <- apply(expand.grid(c("early", "mid", "late"), c("11", "12", "1", "2", "3", "4", "5", "6")), 1, paste, collapse="-")[2:24]
+
+pdNames <- apply(expand.grid(c("Early", "Mid", "Late"), c("November", "December", "January", "February", "March", "April", "May", "June")), 1, paste, collapse=" ")[2:24]
+
+periods <- icel |>
+  mutate(month = month(date),
+         monthpart = ifelse(day(date) < 11, "early", ifelse(day(date) < 21, "mid", "late")),
+         monthpart = factor(monthpart, levels=c("early", "mid", "late"), ordered=T),
+         realyear = year(date)) |>
+  na.omit(monthpart) |>
+  group_by(year, month, monthpart) |>
+  summarise(avg=mean(value, na.rm=T),
+            max=max(value, na.rm=T),
+            min=min(value, na.rm=T),
+            total=sum(value, na.rm=T),
+            over10 = mean(value >= 10, na.rm=T),
+            over20 = mean(value >= 20, na.rm=T),
+            over30 = mean(value >= 30, na.rm=T),
+            over40 = mean(value >= 40, na.rm=T),
+            over50 = mean(value >= 50, na.rm=T),
+            realyear=mean(realyear)) |>
+  mutate(period = factor(paste(monthpart, month, sep="-"), levels=pds, ordered=T)) |>
+  na.omit(period) |>
+  arrange(realyear, month, monthpart)
+```
+
+# Introduction
+The 5 great lakes of North America - Erie, Huron, Michigan, Ontario, and Superior - are the 5 of the worlds largest lakes by surface area (top 12 with Superior the largest if the Caspian Sea isn't included), have great impact on the commerce and wildlife of the Great Lakes region. Issues such as climate change have potentially concerning impacts on the Great Lakes. One potential area of interest is what percentage of the Great Lakes is covered in ice. Ice coverage can effect commerce and wildlife. An example of a concerning trend relating to ice coverage is how the wild moose population has been declining in the region, which experts believe is due to increasing size of wolf pack. This is due to increased snow coverage, as scientists have studied that when there is deeper snow in the region, wolves tend to hunt in bigger packs. It is also known that when there is less ice coverage, there is increased 'lake effect' during the winter leading to more snow, and therefore experts have concluded that a very reasonable guess as to what is causing declining moose populations could potentially be less ice coverage, which is why the Environmental Law and Policy Center and the Great Lakes Environmental Research Laboratory have started to study the ice coverage of the great lakes in more depth. This analysis attempts to find a trend in ice coverage over the last 52 years.
+
+The data provided gives the GLERL recorded ice coverage percentage on each day from November 10th to June 5th each year. The years covered are 1973-2024, and each winter is represented by the year the winter ended. For example, the year 2020 covers November 10th 2019 to Jun 5th 2020. Not all days have recorded measures, especially in earlier year, the GLERL started recording ice percentages much alter in the year, most likely due to them being unable to accurately track the ice coverage across all 5 lakes due to inadequate technology. The 1990s is when the GRERL started to more accurately track the start of ice coverage for the winter. Although even in the earlier years, the end of ice coverage seemed to be tracked more accurately then the start of it. Lastly, ice coverage does not start or end on the same day every year, the data starts with November 10th because that is the earliest ice coverage was ever recorded. 
+
+# Methodology
+
+Based on the Environmental Law and Policy Center's 2019 report on the assessment of the impacts of climate change on the great lakes, ice coverage starts to impact the shorelines of the Great Lakes more significantly at 10% and 20% coverage. At 10% ice coverage, there is a measurable transition from unrestricted wave action to restricted wave action along the shoreline. At 20%, this becomes a complete restriction of wave action, or total protection of the shoreline from wave action as well as severe restrictions on overall wave generation throughout the lakes. The article suggests that based on their results of the NOAA/GRERL data, that the number of days over 10% and 20% have decreased by 23 and 24 days from the winters of 1973-1974 to 2017-2018. However, they do not explain the modeling approach, and the data provided has 7 more years of data.
+
+The main variable of interest chosen is the number of days over 20% ice coverage. This accounts for the duration of the ice coverage for each winter, as well as taking into account that the most critical threshold point for wave reduction is 20% ice coverage. To model this, a quasi-poisson model is fit using the year to predict the number of days over 20% threshold. A quasi-poisson is most appropriate due to high variability in number of days above 20% ice coverage.
+
+The model follows *equation (1)*:
+$$(1). DaysOver20pct = \beta_0+\beta_1*year+\epsilon$$
+with epsilons distributed: ~$N({DaysOver20pct}, \delta*{DaysOver20pct})$, where delta is the free dispersion parameter to account for over dispersion. 
+
+
+Another factor that was tested was autocorrelation between years. It was found through *XXX Test* that there was no significant autocorrelation from year to year, however, through *XXX Tests* it was found that there is a negative autocorrelation for every 2 year lag, as well as a positive autocorrelation between every 4 year lag. An ARIMA model using both of these lags proved to result in a lower AIC than a model using either lag individually, as well as a model that used no lag. Therefore the final model used is a quasi-poisson using the lag 2 and lag 4 of over 20% ice coverage along with the year to predict the number of days to be over 20% ice coverage.
+
+$$(2). DaysOver20pct = \beta_0+\beta_1*year+\epsilon+\beta_{2}*lag_2+\beta_3*lag_4+\epsilon$$
+
+with epsilons distributed: ~$N({DaysOver20pct}, \delta*{DaysOver20pct})$
+
+
+
+
+# Results
+
+## EDA
+
+Table 01 displays the average and standard deviation of ice coverage for each decade that ice coverage was recorded in. Immediately, it would seem that table 01 shows a decreasing trend in coverage and variability in coverage, however it is important to note that the start and end of ice coverage recording was not as accurate earlier in reporting. So there are a lot less values closer to 0, with some years missing up to potentially a month of lower ice coverage values that would reduce the average, so this table does not necessarily show any trend, except prove that the decreasing mean trend that is expected to be seen based on how the data was recorded is accurate. 
+
+#### Table 01: Ice Coverage by Decade
+```{r}
+decades <- icel |> 
+  mutate(decade = case_when((1973 <= year & year <= 1979)~"1970s",
+                            (1980 <= year & year <= 1989)~"1980s",
+                            (1990 <= year & year <= 1999)~"1990s",
+                            (2000 <= year & year <= 2009)~"2000s",
+                            (2010 <= year & year <= 2019)~"2010s",
+                            (2020 <= year & year <= 2029)~"2020s")) %>%
+  group_by(decade) %>%
+  summarise(Average = mean(value, na.rm=TRUE),
+           StandardDeviation = sd(value, na.rm=TRUE)) %>%
+  mutate(NumberOfYearsOnRecord = c(7, 10, 10, 10, 10, 5))
+
+  kable(decades, col.names =c("Decade", "Average Ice Coverage", "Standard Deviation", "# Years on Record"), booktabs=TRUE, padding=20)
+
+```
+
+
+
+
+Figure 03 investigates trends seen in Figure 02 comparing the number of days above 10% ice coverage and days above 20% ice coverage each year. This figure also includes a 5 year rolling average, so each years rolling average is that year, the 2 years proceeding it, and the 2 years after it number of days over 10 and 20% averaged together. When plotting the rolling average, the variability from year to year decreases a lot, and a more clear trend can be seen. It now appears based on the rolling average that the number of days over 10% and 20% decrease over time, and decreased more dramatically after the cold spells in the winters of 2013 and 2014. Another thing worth noting is that the lines for days of ice coverage over 10 and 20% having rolling means that are almost identical, with the days with 20% or higher being shifted down from the 10% line. This, along with the similar tendencies spotted among critical percentage points in Figure 02, may suggest that for almost any percentage threshold, the trend seen across years will be almost identical, if not extremely similar. In fact, Figure 04 plots this very strong positive linear correlation. The Figure 04 plot also agrees with Figure 03 plot indicating that there is a decreasing trend in number of days with 10% and 20% or more ice coverage from 1973-2024.
+
+
+#### Figure 01: Days of 10% + and 20% + Ice Coverage and 5 Year Rolling Average
+```{r}
+ggplot(yearly, aes(x=as.numeric(year))) +
+  geom_line(aes(y=over10), color="gray80") +
+  geom_line(aes(y=zoo::rollmean(over10, 5, na.pad=T)), color="#8888ff") +
+  geom_line(aes(y=over20), color="gray60") +
+  geom_line(aes(y=zoo::rollmean(over20, 5, na.pad=T)), color="#000088") +
+  theme_minimal() +
+  theme(axis.title.x = element_blank()) +
+  labs(y="Days", title="Days with 10% and 20% ice cover by year, with 5-year moving average")
+```
+
+
+
+#### Figure 02: Relationship Of Days Over 10% and 20%
+```{r}
+  ggplot(yearly, aes(y=zoo::rollmean(over20, 5, na.pad=T), x=zoo::rollmean(over10, 5, na.pad=T))) +
+  geom_point(aes(color=as.numeric(year))) +
+   geom_smooth(method='lm',formula=y~x, color='firebrick', size=.2)+
+  scale_colour_continuous(type="viridis") +
+  theme_minimal() +
+  labs(x= "Days over 10%",
+       y= "Days over 20%",
+       title="Linear Relationship Among Days of Ice Coverage Over 10 and 20%",
+        color="Year")
+
+```
+
+Further investigation into separating each month into 10 day periods (8, 9, 10, or 11 days for the ending period depending on the month), and then totaling the ice coverage seen in each month period of each year to see if there is a difference in when ice coverage peaked in the winter over time is displayed in Figure 06. There again appears to be a lot of noise and no clear trends, except that Mid January to Late March seems to have most of the total ice coverage for each year.
+To reduce noise, endpoints that did not contribute much to the total such as mid November to early December, as well as mid April to early June (noting no other potential periods in the year between early June and early November have any recorded ice coverage) are removed in Figure 07. Now, colors are more distinguishable but there seems to be no difference in no real trend being observed. Between small sets of 3-5 year spans there can be observable shifts in peak ice coverage, but across the entire time frame there is no real trend. 
+
+#### Figure 03: Total Ice Per Period Of the Year (Reduced)
+```{r}
+ggplot(filter(periods, !(period %in% c("mid-11","late-11","early-12", "mid-4","late-4","early-5","mid-5","late-5","early-6")))) +
+  geom_col(aes(x=year, y=total, fill=period), position="fill", width=1) +
+  scale_fill_hue(labels=pdNames[4:17]) +
+  scale_y_continuous(expand=c(0,0)) +
+  scale_x_continuous(expand=c(0,0)) +
+  theme_minimal() +
+  theme(axis.title.x=element_blank()) +
+  labs(y="Percentage of year's total ice", fill="Period")
+```
+
+
+#### Maybe Autocorrelation lag 4?
+```{r, eval=FALSE}
+library(smplot2)
+over10df <- icel %>%
+  group_by(year) %>%
+  filter(value >= 10) %>%
+  mutate(AUC = as.numeric(gsub("days", "", sm_auc(date, value)))) %>%
+  select(year, AUC) %>%
+  unique()
+
+combo <- merge(over10df, yearly, by='year') %>%
+  mutate(AUCover10 = AUC/over10)
+
+
+grouping <- data.frame(grouping=c(1,2,3,4,1,2,3,4,1,2,3,4,1,2,3,4,1,2,3,4,1,2,3,4,1,2,3,4,1,2,3,4,1,2,3,4,1,2,3,4,1,2,3,4,1,2,3,4,1,2,3,4),
+                       year = seq(from=1973, to=2024, by=1),
+                       grouping2 = c(1,2,1,2,1,2,1,2,1,2,1,2,1,2,1,2,1,2,1,2,1,2,1,2,1,2,1,2,1,2,1,2,1,2,1,2,1,2,1,2,1,2,1,2,1,2,1,2,1,2,1,2)
+)
+
+combo <- merge(combo, grouping, by='year')
+
+ggplot(combo, aes(y=over20, x=as.numeric(year), group=factor(grouping2), color=factor(grouping2))) +
+  geom_line() +
+  theme_minimal()
+
+
+```
+
+
+
+
+# Modeling
+
+As mentioned previously, the basic model that is most appropriate given the response variable is a quasipoisson model. However, this does not account for autocorrelation between years. This is tested for in figures 04 and 05. In figure 04 it is shown that the only significant lag is 4 years, meaning there is autocorrelation in 4 year increments when looking at the series of days over the 20% ice coverage threshold. Figure 05 takes the basic quasipoisson model in *EQUATION XXX* and tests for autocorrelation of the residuals. This test suggests a lag every 2 and 4 years. 
+
+#### Figure 04: Autocorrelation Test of Days with over 20% Ice coverage - XXXX TEST
+```{r}
+
+qp <- glm(over20 ~ year, data=yearly, family=quasipoisson)
+qp_a <- glm(over20 ~ year + lag(over20, n=2), data=yearly, family=quasipoisson)
+qp_b <- glm(over20 ~ year + lag(over20, n=2) + lag(over20, n=4), data=yearly, family=quasipoisson)
+
+
+ggAcf(yearly$over20) +
+  labs(title='Series of Days with Ice Coverage over 20%',
+       x='Lag (autocorrelation every x years)') +
+  annotate('text', label="Significant Autocorrelation", x=10, y=.3, color='blue')
+```
+
+
+#### Figure 05: Autocorrelation Or Residuals Of Base QuasiPoisson Model - XXXX TEST
+```{r}
+ggAcf(residuals(qp)) +
+  labs(title='Series of Residuals of Quasipoisson Model',
+       x='Lag (autocorrelation every x years)') +
+  annotate('text', label="Significant Autocorrelation", x=10, y=.3, color='blue')
+```
+
+
+```{r, eval=FALSE}
+qp <- glm(over20 ~ year, data=yearly, family=quasipoisson)
+qp_a <- glm(over20 ~ year + lag(over20, n=2), data=yearly, family=quasipoisson)
+qp_b <- glm(over20 ~ year + lag(over20, n=2) + lag(over20, n=4), data=yearly, family=quasipoisson)
+
+summary(qp)
+summary(qp_a)
+summary(qp_b)
+
+autoplot(qp)
+ggAcf(yearly$over20)
+ggPacf(yearly$over20)
+ggAcf(residuals(qp))
+ggPacf(residuals(qp))
+
+lmtest::dwtest(yearly$over20 ~ yearly$year)
+lmtest::bgtest(yearly$over20 ~ yearly$year, order=2)
+Box.test(yearly$over20, lag=2, type="Ljung-Box")
+
+lmtest::dwtest(resid(qp) ~ yearly$year)
+lmtest::bgtest(resid(qp) ~ yearly$year, order=4)
+Box.test(resid(qp), lag=4, type="Ljung-Box", fitdf=1)
+
+auto.arima(resid(qp))
+Arima(resid(qp), order=c(2,0,0), include.mean=FALSE, fixed=c(0,NA))
+Arima(resid(qp), order=c(4,0,0), include.mean=FALSE, fixed=c(0,NA,0,NA))
+
+lmtest::dwtest(resid(qp_a) ~ yearly$year[3:52])
+lmtest::bgtest(resid(qp_a) ~ yearly$year[3:52], order=4)
+Box.test(resid(qp_a), lag=4, type="Ljung-Box", fitdf=1)
+
+autoplot(qp_b)
+ggAcf(residuals(qp_b))
+ggPacf(residuals(qp_b))
+```
+
+
+Based on the output of figure 06, the final model summary suggests that for a quasipoisson model with a dispersion parameter of 21.64 suggests that the year of a winter has a significant negative relationship (p-value = 0.005, t-value = -2.98) with the number of days over 20% ice coverage. There also seems to be some potential for significant lags of 2 (p-value=0.086, t-value = -1.76) and 4 years (p-value=0.076, t-value = 1.82). This likely explains why the plots of number of days of ice coverage above 20% seem to be very variable, as there appears to be some natural phenomenon that occurs roughly every 2 and 4 years that has an effect on the winter's ice coverage. Possible weather pattern such as El Nino and La Nina were briefly investigated, but they do not appear to have any repeating 2 or 4 year pattern, or any significant relationship to days of ice coverage over 20%. However, there appears nonetheless to be a significant decreasing trend in days over 20% ice coverage from 1973-2024.
+
+
+#### Figure 06: Final Model Summary 
+```{r, include=FALSE}
+
+
+tidy_model <- broom.mixed::tidy(qp_b)
+
+tidy_model %>%
+  gt() %>%
+  tab_header(
+    title = "Duration of Ice Coverage Over 20%",
+    subtitle = "Detailed output of year and lag effects"
+  ) %>%
+  fmt_number(
+    columns = vars(estimate, std.error, statistic, p.value),
+    decimals = 3
+  ) %>%
+  cols_label(
+    term = "Predictor",
+    estimate = "Estimate",
+    std.error = "Std. Error",
+    statistic = "t-Value",
+    p.value = "P-Value"
+  )
+
+
+
+```
+
+
+# Discussion
+There appears to be a significant decrease in number of days above 20% ice coverage of the Great Lakes over time. This is important because it may suggest that climate change is affecting the ice coverage of the Great Lakes, which can affect wave generation of the lake, erosion of the shores, and can cause other weather patterns such as increased snowfall that affect wildlife in the region. However, it is also found that the significant 2 and 4 year lags seem to suggest some sort of overarching weather phenomenon that is not studied here, and based on the high variability seen approximately every 2 to 4 years in figure 01 seem to suggest that climate change is not affecting this overarching weather phenomenon. There is not enough evidence to see if there are natural dips in ice coverage over multiple decades, and if the number of days above 20% ice coverage will eventually start to increase again on their own overtime as a part of an even bigger recurring weather phenomenon. The Earth is billions of years old, and there is only half a century of data, so it may be appropriate to conclude that climate change is decreasing days over 20% ice coverage without affecting overall weather patterns, but it is truly hard to conclude without centuries of evidence. 
+
+# References
+
+Hughes, Micheal (2024, November) Data Analytics Practicum
+
+Min, S. H., & Zhou, J. (2021). smplot: an R package for easy and elegant data visualization. Frontiers in Genetics, 12, 802894. [pdf] [codes]
+
+Wuebbles, D., Cardinale, B., Cherkauer, K., Davidson-Arnott, R., Hellmann, J., Infante, D., Johnson, L., De Loë, R., NOAA GLERL, Packman, A., Seglenieks, F., Sharma, A., Sohngen, B., Tiboris, M., Vimont, D., Wilson, R., Kunkel, K., & Ballinger, A. (2021). An assessment of the impacts of climate change on the Great Lakes. In The Great Lakes. https://elpc.org/wp-content/uploads/2020/04/2019-ELPCPublication-Great-Lakes-Climate-Change-Report.pdf
+
+
+
+
+
+# Appendix 
+##### Code
+```{r, eval=FALSE}
+knitr::opts_chunk$set(echo = FALSE, warning=FALSE)
+
+library(tidyverse)
+library(scales)
+library(kableExtra)
+library(forecast)
+library(broom.mixed)
+library(gt)
+#install.packages("forecast")
+
+# ice <- read_csv("greatlakesicedata.csv") #ethan version
+ ice <- read_csv("C:/DESKTOP/SEMESTER 7/STA 660/Great Lakes Ice Coverage/greatlakesicedata.csv") #ryan version
+icel <- ice |>
+  pivot_longer(cols=`1973`:`2024`, names_to="year") |>
+  mutate(
+    day = ydm(paste0("1904-",`...1`)),
+    date = as.Date(ifelse(day < ymd("1904-08-01"), ydm(paste0(year,"-",`...1`)), ydm(paste0(as.numeric(year)-1,"-",`...1`)))),
+    day = as.Date(ifelse(day < ymd("1904-08-01"), ydm(paste0("1904-",`...1`)), ydm(paste0("1903-",`...1`)))),
+    year = as.numeric(year)) |>
+  arrange(date)
+
+dailymeans <- icel |>
+  group_by(day) |>
+  summarise(cover=mean(value, na.rm=T),
+            obs = sum(!is.na(value)))
+
+yearly <- icel |>
+  group_by(year) |>
+  summarise(avg=mean(value, na.rm=T),
+            max=max(value, na.rm=T),
+            min=min(value, na.rm=T),
+            total=sum(value, na.rm=T),
+            over10 = sum(value >= 10, na.rm=T),
+            over20 = sum(value >= 20, na.rm=T),
+            over30 = sum(value >= 30, na.rm=T),
+            over40 = sum(value >= 40, na.rm=T),
+            over50 = sum(value >= 50, na.rm=T))
+
+pds <- apply(expand.grid(c("early", "mid", "late"), c("11", "12", "1", "2", "3", "4", "5", "6")), 1, paste, collapse="-")[2:24]
+
+pdNames <- apply(expand.grid(c("Early", "Mid", "Late"), c("November", "December", "January", "February", "March", "April", "May", "June")), 1, paste, collapse=" ")[2:24]
+
+periods <- icel |>
+  mutate(month = month(date),
+         monthpart = ifelse(day(date) < 11, "early", ifelse(day(date) < 21, "mid", "late")),
+         monthpart = factor(monthpart, levels=c("early", "mid", "late"), ordered=T),
+         realyear = year(date)) |>
+  na.omit(monthpart) |>
+  group_by(year, month, monthpart) |>
+  summarise(avg=mean(value, na.rm=T),
+            max=max(value, na.rm=T),
+            min=min(value, na.rm=T),
+            total=sum(value, na.rm=T),
+            over10 = mean(value >= 10, na.rm=T),
+            over20 = mean(value >= 20, na.rm=T),
+            over30 = mean(value >= 30, na.rm=T),
+            over40 = mean(value >= 40, na.rm=T),
+            over50 = mean(value >= 50, na.rm=T),
+            realyear=mean(realyear)) |>
+  mutate(period = factor(paste(monthpart, month, sep="-"), levels=pds, ordered=T)) |>
+  na.omit(period) |>
+  arrange(realyear, month, monthpart)
+
+
+# Methodology
+
+
+
+
+# Results
+
+## EDA
+
+
+#### Table 01: Ice Coverage by Decade
+decades <- icel |> 
+  mutate(decade = case_when((1973 <= year & year <= 1979)~"1970s",
+                            (1980 <= year & year <= 1989)~"1980s",
+                            (1990 <= year & year <= 1999)~"1990s",
+                            (2000 <= year & year <= 2009)~"2000s",
+                            (2010 <= year & year <= 2019)~"2010s",
+                            (2020 <= year & year <= 2029)~"2020s")) %>%
+  group_by(decade) %>%
+  summarise(Average = mean(value, na.rm=TRUE),
+           StandardDeviation = sd(value, na.rm=TRUE)) %>%
+  mutate(NumberOfYearsOnRecord = c(7, 10, 10, 10, 10, 5))
+
+  kable(decades, col.names =c("Decade", "Average Ice Coverage", "Standard Deviation", "# Years on Record"), booktabs=TRUE, padding=20)
+
+
+
+
+
+
+
+#### Figure 01: Days of 10% + and 20% + Ice Coverage and 5 Year Rolling Average
+ggplot(yearly, aes(x=as.numeric(year))) +
+  geom_line(aes(y=over10), color="gray80") +
+  geom_line(aes(y=zoo::rollmean(over10, 5, na.pad=T)), color="#8888ff") +
+  geom_line(aes(y=over20), color="gray60") +
+  geom_line(aes(y=zoo::rollmean(over20, 5, na.pad=T)), color="#000088") +
+  theme_minimal() +
+  theme(axis.title.x = element_blank()) +
+  labs(y="Days", title="Days with 10% and 20% ice cover by year, with 5-year moving average")
+
+
+
+
+#### Figure 02: Relationship Of Days Over 10% and 20%
+
+  ggplot(yearly, aes(y=zoo::rollmean(over20, 5, na.pad=T), x=zoo::rollmean(over10, 5, na.pad=T))) +
+  geom_point(aes(color=as.numeric(year))) +
+   geom_smooth(method='lm',formula=y~x, color='firebrick', size=.2)+
+  scale_colour_continuous(type="viridis") +
+  theme_minimal() +
+  labs(x= "Days over 10%",
+       y= "Days over 20%",
+       title="Linear Relationship Among Days of Ice Coverage Over 10 and 20%",
+        color="Year")
+
+
+
+
+#### Figure 03: Total Ice Per Period Of the Year (Reduced)
+ggplot(filter(periods, !(period %in% c("mid-11","late-11","early-12", "mid-4","late-4","early-5","mid-5","late-5","early-6")))) +
+  geom_col(aes(x=year, y=total, fill=period), position="fill", width=1) +
+  scale_fill_hue(labels=pdNames[4:17]) +
+  scale_y_continuous(expand=c(0,0)) +
+  scale_x_continuous(expand=c(0,0)) +
+  theme_minimal() +
+  theme(axis.title.x=element_blank()) +
+  labs(y="Percentage of year's total ice", fill="Period")
+
+
+
+#### Maybe Autocorrelation lag 4?
+library(smplot2)
+over10df <- icel %>%
+  group_by(year) %>%
+  filter(value >= 10) %>%
+  mutate(AUC = as.numeric(gsub("days", "", sm_auc(date, value)))) %>%
+  select(year, AUC) %>%
+  unique()
+
+combo <- merge(over10df, yearly, by='year') %>%
+  mutate(AUCover10 = AUC/over10)
+
+
+grouping <- data.frame(grouping=c(1,2,3,4,1,2,3,4,1,2,3,4,1,2,3,4,1,2,3,4,1,2,3,4,1,2,3,4,1,2,3,4,1,2,3,4,1,2,3,4,1,2,3,4,1,2,3,4,1,2,3,4),
+                       year = seq(from=1973, to=2024, by=1),
+                       grouping2 = c(1,2,1,2,1,2,1,2,1,2,1,2,1,2,1,2,1,2,1,2,1,2,1,2,1,2,1,2,1,2,1,2,1,2,1,2,1,2,1,2,1,2,1,2,1,2,1,2,1,2,1,2)
+)
+
+combo <- merge(combo, grouping, by='year')
+
+ggplot(combo, aes(y=over20, x=as.numeric(year), group=factor(grouping2), color=factor(grouping2))) +
+  geom_line() +
+  theme_minimal()
+
+
+
+
+
+
+
+# Modeling
+
+
+#### Figure 04: Autocorrelation Test of Days with over 20% Ice coverage - XXXX TEST
+
+qp <- glm(over20 ~ year, data=yearly, family=quasipoisson)
+qp_a <- glm(over20 ~ year + lag(over20, n=2), data=yearly, family=quasipoisson)
+qp_b <- glm(over20 ~ year + lag(over20, n=2) + lag(over20, n=4), data=yearly, family=quasipoisson)
+
+
+ggAcf(yearly$over20) +
+  labs(title='Series of Days with Ice Coverage over 20%',
+       x='Lag (autocorrelation every x years)') +
+  annotate('text', label="Significant Autocorrelation", x=10, y=.3, color='blue')
+
+
+#### Figure 05: Autocorrelation Or Residuals Of Base QuasiPoisson Model - XXXX TEST
+ggAcf(residuals(qp)) +
+  labs(title='Series of Residuals of Quasipoisson Model',
+       x='Lag (autocorrelation every x years)') +
+  annotate('text', label="Significant Autocorrelation", x=10, y=.3, color='blue')
+
+qp <- glm(over20 ~ year, data=yearly, family=quasipoisson)
+qp_a <- glm(over20 ~ year + lag(over20, n=2), data=yearly, family=quasipoisson)
+qp_b <- glm(over20 ~ year + lag(over20, n=2) + lag(over20, n=4), data=yearly, family=quasipoisson)
+
+summary(qp)
+summary(qp_a)
+summary(qp_b)
+
+autoplot(qp)
+ggAcf(yearly$over20)
+ggPacf(yearly$over20)
+ggAcf(residuals(qp))
+ggPacf(residuals(qp))
+
+lmtest::dwtest(yearly$over20 ~ yearly$year)
+lmtest::bgtest(yearly$over20 ~ yearly$year, order=2)
+Box.test(yearly$over20, lag=2, type="Ljung-Box")
+
+lmtest::dwtest(resid(qp) ~ yearly$year)
+lmtest::bgtest(resid(qp) ~ yearly$year, order=4)
+Box.test(resid(qp), lag=4, type="Ljung-Box", fitdf=1)
+
+auto.arima(resid(qp))
+Arima(resid(qp), order=c(2,0,0), include.mean=FALSE, fixed=c(0,NA))
+Arima(resid(qp), order=c(4,0,0), include.mean=FALSE, fixed=c(0,NA,0,NA))
+
+lmtest::dwtest(resid(qp_a) ~ yearly$year[3:52])
+lmtest::bgtest(resid(qp_a) ~ yearly$year[3:52], order=4)
+Box.test(resid(qp_a), lag=4, type="Ljung-Box", fitdf=1)
+
+autoplot(qp_b)
+ggAcf(residuals(qp_b))
+ggPacf(residuals(qp_b))
+
+
+
+
+#### Figure 06: Final Model Summary 
+
+
+tidy_model <- broom.mixed::tidy(qp_b)
+
+tidy_model %>%
+  gt() %>%
+  tab_header(
+    title = "Duration of Ice Coverage Over 20%",
+    subtitle = "Detailed output of year and lag effects"
+  ) %>%
+  fmt_number(
+    columns = vars(estimate, std.error, statistic, p.value),
+    decimals = 3
+  ) %>%
+  cols_label(
+    term = "Predictor",
+    estimate = "Estimate",
+    std.error = "Std. Error",
+    statistic = "t-Value",
+    p.value = "P-Value"
+  )
+
+
+
+```
+
+

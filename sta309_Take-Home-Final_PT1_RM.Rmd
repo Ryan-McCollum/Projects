@@ -1,0 +1,78 @@
+---
+title: "sta309_Take-Home-Final_PT1_RM"
+author: "Ryan McCollum"
+date: "2023-05-03"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+
+library(tidyverse)
+library(caret)
+library(mplot)
+```
+
+# Take Home Final
+
+
+ 
+## Data Set Cleaning
+```{r}
+heart_disease <- data.frame(read.csv("heart_disease.csv") %>%
+  mutate(HeartDisease = factor(HeartDisease, levels=c(0,1), labels=c("No", "Yes")),
+         FastingBS = factor(FastingBS, levels=c(0,1), labels=c("No", "Yes"))))
+```
+
+## $k$-Fold Validation
+```{r}
+## Creating training method
+trainingMethod <- trainControl(method="repeatedcv", number=5, repeats=10)
+```
+
+### Random Forest
+```{r randomForest, cache=TRUE}
+set.seed(05042023)
+randForest <- train(HeartDisease~ Age + Sex + ChestPainType + RestingBP + Cholesterol +
+                FastingBS + RestingECG + MaxHR + ExerciseAngina + Oldpeak + ST_Slope, 
+                data=heart_disease,
+                method="rf",
+                trControl=trainingMethod,
+                tuneGrid=expand.grid(mtry=1:6),
+                importance=TRUE)
+print(randForest)
+plot(randForest)
+plot(varImp(randForest))
+```
+
+
+
+### Full Main-Effects Logistic Regression Model
+```{r}
+trainingMethod <- trainControl(method="repeatedcv", number=5, repeats=10)
+set.seed(05042023)
+mainEffect.lm <- train(HeartDisease~ Age + Sex + ChestPainType + RestingBP + Cholesterol +
+                FastingBS + RestingECG + MaxHR + ExerciseAngina + Oldpeak + ST_Slope,
+                data=heart_disease,
+                method="glm",
+                family=binomial,
+                trControl=trainingMethod)
+
+```
+
+
+
+## Comparing accuracy
+```{r}
+set.seed(05042023)
+model_performance <- resamples(list(LogReg_lm = mainEffect.lm,
+                                    RandomForest = randForest))
+summary(model_performance)
+ggplot(model_performance) +
+  theme_minimal()
+```
+
+## Findings
+**Based on predictive accuracy between the 2 models displayed in the summary, the random forest model does a slightly better job at predicting whether or not a person has heart disease than the logistic regression model on average does by just over 1% (87.496 % compared to 86.265 %). Although it has a slightly wider IQR, which may suggest that is is more likely to vary in accuracy, overall it has a higher minimum, 1st quartile, median, mean, 3rd quartile and maximum predictive accuracy than the logistic regression model.  The graph also suggests that the random forest is better, as the confidence interval for the accuracy of the random forest model is much higher, despite some small overlap, than that of the logistic regression model. This contextually is important because it means that the random forest model can predict whether or not a person has heart disease more often, about 1 or 2 more correct predictions out of 100 people. Which can be extremely significant, especially since heart disease is a leading cause of death in US adults, even if it is only slightly more often.**
+
+**Based on earlier output, the two strongest indicators of whether or not a person has heart disease based on the random forest output are whether or not your peak exercise ST segment is upsloping or flat. Since these are both levels of the same variable, I think using the third most important predictor of heart disease, someone having exercise-induced angina can be helpful. All 3 of these variables have an importance above 80, and after these 3 the importance starts to drop off, but it may still be worth looking at a person being male, a persons oldpeak or their ST depression induced by exercise relative to rest, and finally their cholesterol, as these are the next 3 most important variables and all have an importance of roughly 70 or higher. However, earlier output also suggested that the random forest model is most accurate when randomly selecting only 2 predictors**
